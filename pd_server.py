@@ -87,8 +87,12 @@ def create_app(cfg, trace_path=None, runtime_factory=PDRuntime):
         def format_result(event, streaming):
             token = event["token_id"]
             out_ids.append(token)
-            delta = detok.update(out_ids, event["finished"])
-            text = delta if streaming else detok.text
+            if "decoded_text" in event:
+                # The upstream mixed engine already detokenizes its outputs.
+                text = event["decoded_delta"] if streaming else event["decoded_text"]
+            else:
+                delta = detok.update(out_ids, event["finished"])
+                text = delta if streaming else detok.text
             choice = {"index": 0, "finish_reason": event["finish_reason"]}
             if chat:
                 choice["delta" if streaming else "message"] = {"role": "assistant", "content": text}

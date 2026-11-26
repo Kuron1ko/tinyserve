@@ -251,9 +251,91 @@ python bench_pd.py \
 但不要据此下 P99 性能结论。终端输出 TTFT / ITL 百分位、吞吐和失败率，逐请求
 数据写入指定 JSONL。当前尚未实现 ShareGPT/LongBench 加载器。
 
-双卡等资源基线：先停止 P/D，再在两张卡各运行一个混合引擎实例，命令见
-[双卡等资源评测](docs/PD_DESIGN.md#双卡等资源评测)。比较时保持模型、后端、
-输入输出、到达速率和随机种子一致。
+### 8.1 对照：请求按到达顺序分配给空闲 KV 页最多的卡
+
+该对照使用两个完整的混合 P+D 实例，每张卡各加载一份模型。CPU 路由器按请求体
+接收完成的顺序，逐个查询两端 `/routing_state`，选择 `free_kv_blocks` 最大的实例；
+相同时轮转。只串行路由决策，选定后的推理并发执行，非流式请求也不会阻塞后续分配。
+请求分配后在该实例完成，不进行跨卡 KV 传输或迁移。
+
+指标是引擎 KV 池中的可分配页数，包含可淘汰的空闲前缀缓存页，不是 `nvidia-smi`
+的空闲显存。快照在调度分配页后、forward 前，以及请求完成释放页后发布。
+它不预测未来 decode 增长，也不为路由中的请求额外预留 KV；密集到达可能看到相同快照。
+两个实例页大小、模型、最大上下文和 attention 后端必须相同。
+
+先停止 P/D，在三个远端终端分别执行。每个终端先进入项目并激活同一虚拟环境：
+
+```bash
+cd ~/tinyserve
+source .venv/bin/activate
+export CUDA_VISIBLE_DEVICES=0,1
+export MODEL="$PWD/models/Qwen2.5-1.5B"
+```
+
+```bash
+# 终端 A：GPU 0 上的完整 P+D 实例。
+python baseline_server.py --model "$MODEL" --device 0 --port 8001
+```
+
+```bash
+# 终端 B：GPU 1 上的完整 P+D 实例。
+python baseline_server.py --model "$MODEL" --device 1 --port 8002
+```
+
+```bash
+# 终端 C：CPU 路由器，不占用额外 GPU。
+python baseline_router.py --backends http://127.0.0.1:8001,http://127.0.0.1:8002 \
+  --policy most_free_kv --port 9000
+```
+
+第四个终端在相同项目环境中执行：
+
+```bash
+curl --fail http://127.0.0.1:9000/health
+python bench_pd.py --model "$PWD/models/Qwen2.5-1.5B" \
+  --urls http://127.0.0.1:9000 \
+  --warmup-urls http://127.0.0.1:8001,http://127.0.0.1:8002 \
+  --requests 1000 --rate 2 --seed 0 \
+  --short-tokens 256 --long-tokens 4096 --short-fraction 0.8 \
+  --output-tokens 256 --output artifacts/mixed_free_kv.jsonl
+```
+
+`--warmup-urls` 确保每个副本都预热。TTFT 从客户端发送开始计时，包含排队、KV 查询、
+代理和模型计算的成本；P99 ITL 使用客户端收到的 token 间隔。
+逐请求结果保存选中的副本编号、路由序号和分配时两端空闲页数。
+路由器 `/metrics` 提供各副本分配数、活动请求和最近 256 次分配；调试时可加
+`--trace artifacts/routing.jsonl` 保存全部分配记录，纯性能测试默认关闭 trace。
+KV 状态查询失败时该次请求返回错误；转发失败不自动重试。
+
+### 8.2 三组实验的比较方式
+
+| 组别 | GPU 工作方式 | 路由器参数 |
+| --- | --- | --- |
+| Mixed + Round Robin | 两张卡各执行完整 P+D | 两个基线 URL，`--policy round_robin` |
+| Mixed + Most Free KV | 两张卡各执行完整 P+D | 两个基线 URL，`--policy most_free_kv` |
+| PD | GPU 0 prefill、GPU 1 decode | P 的单个 URL，`--policy round_robin` |
+
+为使三组都经过同一层 HTTP 代理，PD 组也可以在启动 P/D 后运行：
+
+```bash
+# 先停止上一组路由器及两个基线实例，再按第 6 节启动 P/D。
+python baseline_router.py --backends http://127.0.0.1:8000 --policy round_robin --port 9000
+```
+
+PD 的 bench 同样使用 `--urls http://127.0.0.1:9000`，预热地址改为
+`--warmup-urls http://127.0.0.1:8000`，其他负载参数保持一致。直接访问 P 的结果与
+经过代理的结果应分别标注。每组开始前重启模型实例清空上一轮前缀缓存，再预热。
+每组固定相同 GPU 数量、模型、精度、attention 后端、页大小、上下文和负载种子。
+
+这是完整 serving 方案的对照：混合实例保留上游混合调度器，PD 使用本项目的长短队列
+和预留/扩容策略。若要单独归因 PD 分离，需要再做调度和显存策略一致的消融实验。
+
+新增对照的正确性检查（自动启动两个基线实例和路由器，检查完成后自动退出）：
+
+```bash
+PYTHONPATH=. python tests/smoke_routing.py --model "$PWD/models/Qwen2.5-1.5B" --devices 0,1
+# 单卡功能检查使用 --devices 0,0；不能据此比较双卡性能。
+```
 
 ## 9. 停止、重启与排查
 
@@ -287,3 +369,9 @@ python bench_pd.py \
 2026-11-25 已从隔离 venv 完整安装并验证：Python 3.10.12、PyTorch 2.14.1+cu130、
 `pip check` 和 22 项单元测试通过；Qwen2.5-1.5B 的独立 P/D HTTP/SSE、取消回收、
 退出与参考 token IDs 比较通过。本机结果在 `artifacts/fresh_env_smoke/summary.json`。
+
+2026-11-26 新增可用 KV 页路由对照后，29 项单元测试通过；Qwen2.5-1.5B
+单卡双实例验证了按最大空闲页分配、FIFO 路由决策、流式转发、取消回收以及
+评测脚本记录路由信息，生成 token IDs 与参考引擎一致。
+结果在 `artifacts/routing_smoke/summary.json`；原 P/D 服务的回归结果在
+`artifacts/routing_pd_regression/summary.json`。这些功能检查不代表双卡性能结果。

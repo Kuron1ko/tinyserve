@@ -22,11 +22,14 @@ tinyserve/
 ├── p_server.py              # 独立 P 入口：HTTP 服务 + P GPU worker
 ├── d_server.py              # 独立 D 入口：连接 P、获取配置、启动 D GPU worker
 ├── pd_server.py             # 共用 HTTP API；也保留单命令启动 P+D 的入口
-├── baseline_server.py       # 单 GPU 混合 P+D 基线；双卡比较时启动两个实例
+├── baseline_server.py       # 单 GPU 混合 P+D 基线；发布 KV 资源快照
+├── baseline_router.py       # FIFO 路由：空闲 KV 页最多优先 / 轮转
 ├── bench_pd.py              # 合成长短混合负载，采集 TTFT / ITL / 失败率
 ├── trace_local.py           # 原有本机调用链追踪工具
 ├── pd/
 │   ├── config.py            # PDConfig：模型、GPU、通信与策略参数
+│   ├── mixed.py             # 混合基线计算线程、GPU 绑定、HTTP token 适配、KV 快照
+│   ├── routing.py           # 多副本选择策略：最大空闲页与轮转平局处理
 │   ├── policy.py            # 长短队列、chunk 调度、D 预留/扩容、背压策略
 │   ├── worker.py            # PrefillWorker / DecodeWorker 请求状态机
 │   ├── transport.py         # 整页 KV 打包/导入，NCCL 或 Gloo 张量收发
@@ -38,10 +41,12 @@ tinyserve/
 │   ├── test_pd_policy.py    # 不需要 GPU 的调度、预留、扩容策略测试
 │   ├── test_pd_kv.py        # KV 物理页重映射测试
 │   ├── test_pd_metrics.py   # 延迟百分位与失败率统计测试
+│   ├── test_pd_routing.py   # 路由选择、FIFO、并发、流转发和失败行为
 │   ├── test_pd_ipc.py       # 控制消息顺序、断连、重复启动、启动超时
 │   ├── smoke_pd.py          # 原单入口运行时的真实模型正确性检查
 │   ├── timeout_pd.py        # 扩容超时与资源回收检查
-│   └── smoke_launchers.py   # 两个独立入口的 HTTP/SSE、取消、退出、参考输出检查
+│   ├── smoke_launchers.py   # 两个独立入口的 HTTP/SSE、取消、退出、参考输出检查
+│   └── smoke_routing.py     # 负载感知对照、取消回收、参考输出和评测脚本检查
 └── artifacts/              # 本机测试产生的 trace、评测数据、日志（不提交 git）
 ```
 

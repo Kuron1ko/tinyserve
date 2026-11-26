@@ -58,7 +58,7 @@ async def run(args):
     limits = httpx.Limits(max_connections=max(args.requests,4), max_keepalive_connections=max(args.requests,4))
     async with httpx.AsyncClient(timeout=args.timeout, limits=limits, trust_env=False) as client:
         # Warm each replica without using the measured prompts.
-        for url in urls:
+        for url in (args.warmup_urls.split(",") if args.warmup_urls else urls):
             response = await client.post(url.rstrip("/")+"/v1/completions", json={
                 "model":args.model,"prompt":"A brief warmup: ","max_tokens":8,"temperature":0,"ignore_eos":True})
             response.raise_for_status()
@@ -76,6 +76,9 @@ async def run(args):
                     "model":args.model,"prompt":ids,"max_tokens":args.output_tokens,
                     "temperature":0,"ignore_eos":True,"stream":True}) as response:
                     response.raise_for_status()
+                    row["backend_index"] = response.headers.get("x-tinyserve-backend-index")
+                    row["route_sequence"] = response.headers.get("x-tinyserve-route-sequence")
+                    row["routing_free_kv_blocks"] = response.headers.get("x-tinyserve-free-kv-blocks")
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "):
                             continue
@@ -109,6 +112,7 @@ async def run(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--urls", default="http://127.0.0.1:8000")
+    p.add_argument("--warmup-urls", help="Optional direct replica URLs to warm each engine before measuring a router")
     p.add_argument("--model", required=True)
     p.add_argument("--requests", type=int, default=100)
     p.add_argument("--rate", type=float, default=2)
