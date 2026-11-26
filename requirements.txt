@@ -1,0 +1,14 @@
+# Python 3.10-3.12, Linux x86_64. Install via scripts/setup_env.sh so torch's
+# CUDA wheel is selected explicitly BEFORE installing this file.
+# Direct dependencies are pinned; resolved transitive versions are recorded in
+# artifacts/environment.freeze.txt after setup.
+torch==2.14.1
+transformers==5.20.0
+huggingface-hub==2.2.0
+safetensors==0.8.0
+datasets==5.1.0
+numpy==2.2.6
+pandas==2.3.3
+fastapi==0.162.5
+uvicorn==0.54.0
+httpx==0.28.1
